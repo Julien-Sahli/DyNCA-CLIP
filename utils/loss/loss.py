@@ -1,5 +1,7 @@
 import torch
 import numpy as np
+import clip
+from PIL import Image
 
 from utils.loss.vector_field_loss import VectorFieldMotionLoss
 from utils.loss.appearance_loss import AppearanceLoss
@@ -9,13 +11,14 @@ from utils.loss.video_motion_loss import VideoMotionLoss
 class Loss(torch.nn.Module):
     def __init__(self, args):
         super(Loss, self).__init__()
+        
         self.args = args
-
+        self.model, self.preprocess = clip.load("ViT-B/32", device=self.args.DEVICE)
+        
+        self.clip_loss_weight = getattr(args, "clip_loss_weight", 0.0)
         self.appearance_loss_weight = getattr(args, "appearance_loss_weight", 0.0)
-
         self.vector_field_motion_loss_weight = getattr(args, "vector_field_motion_loss_weight", 0.0)
         self.video_motion_loss_weight = getattr(args, "video_motion_loss_weight", 0.0)
-
         self.overflow_loss_weight = getattr(args, "overflow_loss_weight", 0.0)
 
         self._create_losses()
@@ -27,9 +30,33 @@ class Loss(torch.nn.Module):
         overflow_loss = (nca_state - nca_state.clamp(-1.0, 1.0)).abs().mean()
         return overflow_loss, None, None
 
+    def get_clip_loss(self, input_dict, return_summary=True):
+      
+      #todo : put current estimate in image
+      image = self.preprocess(Image.open(self.args.target_appearance_path)).unsqueeze(0).to(self.args.DEVICE)
+      text = clip.tokenize(["bubble texture"]).to(self.args.DEVICE)
+
+      #image_features = self.model.encode_image(image)
+      #text_features = self.model.encode_text(text)
+    
+      similarity, _ = self.model(image, text)
+      min_val = 15
+      max_val = 30
+      similarity = (similarity - min_val) / (max_val - min_val)
+      similarity = 1.0 / (1.0 + np.exp(-5*similarity))
+
+      loss = 1.0 - similarity
+      print("clip loss is ", loss)
+
+      return torch.tensor(loss).to(self.args.DEVICE), None, None
+
     def _create_losses(self):
         self.loss_mapper = {}
         self.loss_weights = {}
+
+        if self.clip_loss_weight != 0:
+            self.loss_mapper["clip"] = self.get_clip_loss
+            self.loss_weights["clip"] = self.clip_loss_weight
 
         if self.overflow_loss_weight != 0:
             self.loss_mapper["overflow"] = self.get_overflow_loss
